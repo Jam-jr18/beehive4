@@ -1,177 +1,449 @@
 /**
- * BEEHIVE RESTOBAR - PROD BACKEND SERVER (Node.js/Express + MySQL)
+ * BEEHIVE RESTOBAR - PROD BACKEND SERVER
+ * Node.js + Express + MySQL
  */
 
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const mysql = require('mysql2/promise');
-const path = require('path');
+import dotenv from 'dotenv';
+import express from 'express';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import mysql from 'mysql2/promise';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+dotenv.config();
+
+// Fix __dirname in ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
+
 const PORT = process.env.PORT || 5000;
 
-// Middleware
+// ======================================
+// MIDDLEWARE
+// ======================================
+
 app.use(cors());
-app.use(bodyParser.json({ limit: '50mb' }));
+
+app.use(bodyParser.json({
+  limit: '50mb'
+}));
+
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// Database Connection Pool
+// ======================================
+// MYSQL CONNECTION
+// ======================================
+
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT || 3306,
+
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+
   ssl: {
-    rejectUnauthorized: false // Required for Aiven/Managed MySQL
+    rejectUnauthorized: false
   }
 });
 
-// Helper to handle async errors
+// ======================================
+// ASYNC HANDLER
+// ======================================
+
 const asyncHandler = fn => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-// --- API ENDPOINTS ---
+// ======================================
+// API ROUTES
+// ======================================
 
-// GET: All Initial Data
+// GET INITIAL DATA
 app.get('/api/init', asyncHandler(async (req, res) => {
-  const [orders] = await pool.query('SELECT * FROM orders ORDER BY timestamp DESC');
-  const [menu] = await pool.query('SELECT * FROM menu');
-  const [categories] = await pool.query('SELECT name FROM categories');
-  const [tables] = await pool.query('SELECT * FROM tables');
-  const [settings] = await pool.query('SELECT * FROM settings LIMIT 1');
+
+  const [orders] = await pool.query(
+    'SELECT * FROM orders ORDER BY timestamp DESC'
+  );
+
+  const [menu] = await pool.query(
+    'SELECT * FROM menu'
+  );
+
+  const [categories] = await pool.query(
+    'SELECT name FROM categories'
+  );
+
+  const [tables] = await pool.query(
+    'SELECT * FROM tables'
+  );
+
+  const [settings] = await pool.query(
+    'SELECT * FROM settings LIMIT 1'
+  );
 
   res.json({
     orders: orders.map(o => {
+
       let parsedItems = [];
+
       try {
-        parsedItems = typeof o.items === 'string' ? JSON.parse(o.items) : o.items;
-      } catch (e) {
-        console.error("Failed to parse items for order:", o.id);
-        parsedItems = [];
+        parsedItems =
+          typeof o.items === 'string'
+            ? JSON.parse(o.items)
+            : o.items;
+      } catch (err) {
+        console.error('JSON Parse Error:', err);
       }
-      return { ...o, items: parsedItems };
+
+      return {
+        ...o,
+        items: parsedItems
+      };
+
     }),
+
     menu,
+
     categories: categories.map(c => c.name),
-    tables: tables.map(t => ({ ...t, isOccupied: !!t.isOccupied })),
+
+    tables: tables.map(t => ({
+      ...t,
+      isOccupied: !!t.isOccupied
+    })),
+
     paymentConfig: settings[0] || {}
   });
+
 }));
 
-// POST: Create Order
+// CREATE ORDER
 app.post('/api/orders', asyncHandler(async (req, res) => {
-  const { customerName, tableNumber, items, total, orderType, paymentMethod, paymentReference, paymentSender } = req.body;
-  
-  // Create a unique ID
-  const id = 'ORD-' + Math.random().toString(36).substr(2, 6).toUpperCase();
+
+  const {
+    customerName,
+    tableNumber,
+    items,
+    total,
+    orderType,
+    paymentMethod,
+    paymentReference,
+    paymentSender
+  } = req.body;
+
+  const id =
+    'ORD-' +
+    Math.random()
+      .toString(36)
+      .substring(2, 8)
+      .toUpperCase();
+
   const timestamp = Date.now();
 
-  // Robust JSON handling for MySQL compatibility
-  let itemsJson = '';
+  let itemsJson = '[]';
+
   try {
-    itemsJson = typeof items === 'string' ? items : JSON.stringify(items);
+
+    itemsJson =
+      typeof items === 'string'
+        ? items
+        : JSON.stringify(items);
+
   } catch (err) {
-    console.error("Invalid items format:", items);
-    return res.status(400).json({ error: "Invalid items format" });
+
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid items format'
+    });
+
   }
 
-  await pool.execute(
-    'INSERT INTO orders (id, customerName, tableNumber, items, total, orderType, paymentMethod, paymentReference, paymentSender, timestamp, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [id, customerName, tableNumber || null, itemsJson, total, orderType, paymentMethod, paymentReference || null, paymentSender || null, timestamp, 'Pending']
-  );
+  await pool.execute(`
+    INSERT INTO orders (
+      id,
+      customerName,
+      tableNumber,
+      items,
+      total,
+      orderType,
+      paymentMethod,
+      paymentReference,
+      paymentSender,
+      timestamp,
+      status
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    id,
+    customerName,
+    tableNumber || null,
+    itemsJson,
+    total,
+    orderType,
+    paymentMethod,
+    paymentReference || null,
+    paymentSender || null,
+    timestamp,
+    'Pending'
+  ]);
 
-  // Sync Table Occupancy with Orders
+  // OCCUPY TABLE
   if (orderType === 'Dine-in' && tableNumber) {
-    await pool.execute('UPDATE tables SET isOccupied = 1 WHERE id = ?', [tableNumber]);
+
+    await pool.execute(
+      'UPDATE tables SET isOccupied = 1 WHERE id = ?',
+      [tableNumber]
+    );
+
   }
 
-  res.status(201).json({ id, status: 'Pending', tableNumber });
+  res.status(201).json({
+    success: true,
+    id,
+    status: 'Pending'
+  });
+
 }));
 
-// PATCH: Update Order Status
+// UPDATE ORDER STATUS
 app.patch('/api/orders/:id/status', asyncHandler(async (req, res) => {
+
   const { id } = req.params;
   const { status } = req.body;
 
-  const [rows] = await pool.query('SELECT tableNumber FROM orders WHERE id = ?', [id]);
+  const [rows] = await pool.query(
+    'SELECT tableNumber FROM orders WHERE id = ?',
+    [id]
+  );
+
   const order = rows[0];
 
-  await pool.execute('UPDATE orders SET status = ? WHERE id = ?', [status, id]);
+  await pool.execute(
+    'UPDATE orders SET status = ? WHERE id = ?',
+    [status, id]
+  );
 
-  if ((status === 'Completed' || status === 'Cancelled') && order?.tableNumber) {
-    await pool.execute('UPDATE tables SET isOccupied = 0 WHERE id = ?', [order.tableNumber]);
+  // FREE TABLE
+  if (
+    (status === 'Completed' ||
+      status === 'Cancelled') &&
+    order?.tableNumber
+  ) {
+
+    await pool.execute(
+      'UPDATE tables SET isOccupied = 0 WHERE id = ?',
+      [order.tableNumber]
+    );
+
   }
 
-  res.json({ success: true });
+  res.json({
+    success: true
+  });
+
 }));
 
-// GET: Menu
+// GET MENU
 app.get('/api/menu', asyncHandler(async (req, res) => {
-  const [rows] = await pool.query('SELECT * FROM menu');
+
+  const [rows] = await pool.query(
+    'SELECT * FROM menu'
+  );
+
   res.json(rows);
+
 }));
 
-// POST: Save/Update Menu Item
+// SAVE / UPDATE MENU ITEM
 app.post('/api/menu', asyncHandler(async (req, res) => {
-  const { id, name, price, category, description, image, accentColor } = req.body;
-  const [exists] = await pool.query('SELECT id FROM menu WHERE id = ?', [id]);
+
+  const {
+    id,
+    name,
+    price,
+    category,
+    description,
+    image,
+    accentColor
+  } = req.body;
+
+  const [exists] = await pool.query(
+    'SELECT id FROM menu WHERE id = ?',
+    [id]
+  );
 
   if (exists.length > 0) {
-    await pool.execute(
-      'UPDATE menu SET name=?, price=?, category=?, description=?, image=?, accentColor=? WHERE id=?',
-      [name, price, category, description, image, accentColor, id]
-    );
+
+    await pool.execute(`
+      UPDATE menu
+      SET
+        name = ?,
+        price = ?,
+        category = ?,
+        description = ?,
+        image = ?,
+        accentColor = ?
+      WHERE id = ?
+    `, [
+      name,
+      price,
+      category,
+      description,
+      image,
+      accentColor,
+      id
+    ]);
+
   } else {
-    await pool.execute(
-      'INSERT INTO menu (id, name, price, category, description, image, accentColor) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, name, price, category, description, image, accentColor]
-    );
+
+    await pool.execute(`
+      INSERT INTO menu (
+        id,
+        name,
+        price,
+        category,
+        description,
+        image,
+        accentColor
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [
+      id,
+      name,
+      price,
+      category,
+      description,
+      image,
+      accentColor
+    ]);
+
   }
-  res.json({ success: true });
+
+  res.json({
+    success: true
+  });
+
 }));
 
-// DELETE: Menu Item
+// DELETE MENU ITEM
 app.delete('/api/menu/:id', asyncHandler(async (req, res) => {
+
   const { id } = req.params;
-  await pool.execute('DELETE FROM menu WHERE id = ?', [id]);
+
+  await pool.execute(
+    'DELETE FROM menu WHERE id = ?',
+    [id]
+  );
+
   res.status(204).send();
+
 }));
 
-// POST: Categories
+// ADD CATEGORY
 app.post('/api/categories', asyncHandler(async (req, res) => {
+
   const { category } = req.body;
-  await pool.execute('INSERT IGNORE INTO categories (name) VALUES (?)', [category]);
-  res.json({ success: true });
+
+  await pool.execute(
+    'INSERT IGNORE INTO categories (name) VALUES (?)',
+    [category]
+  );
+
+  res.json({
+    success: true
+  });
+
 }));
 
-// POST: Settings
+// SAVE SETTINGS
 app.post('/api/settings', asyncHandler(async (req, res) => {
-  const { eWalletNumber, qrCodeUrl, staffPin, adminPin } = req.body;
+
+  const {
+    eWalletNumber,
+    qrCodeUrl,
+    staffPin,
+    adminPin
+  } = req.body;
+
   await pool.execute('DELETE FROM settings');
-  await pool.execute('INSERT INTO settings (eWalletNumber, qrCodeUrl, staffPin, adminPin) VALUES (?, ?, ?, ?)', [eWalletNumber, qrCodeUrl, staffPin, adminPin]);
-  res.json({ success: true });
+
+  await pool.execute(`
+    INSERT INTO settings (
+      eWalletNumber,
+      qrCodeUrl,
+      staffPin,
+      adminPin
+    )
+    VALUES (?, ?, ?, ?)
+  `, [
+    eWalletNumber,
+    qrCodeUrl,
+    staffPin,
+    adminPin
+  ]);
+
+  res.json({
+    success: true
+  });
+
 }));
 
-// PATCH: Table Toggle
+// TOGGLE TABLE
 app.patch('/api/tables/:id', asyncHandler(async (req, res) => {
+
   const { id } = req.params;
   const { isOccupied } = req.body;
-  await pool.execute('UPDATE tables SET isOccupied = ? WHERE id = ?', [isOccupied ? 1 : 0, id]);
-  res.json({ success: true });
+
+  await pool.execute(
+    'UPDATE tables SET isOccupied = ? WHERE id = ?',
+    [isOccupied ? 1 : 0, id]
+  );
+
+  res.json({
+    success: true
+  });
+
 }));
 
-// Catch-all to serve index.html
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+// ======================================
+// FRONTEND FALLBACK
+// ======================================
+
+app.use((req, res) => {
+
+  res.sendFile(
+    path.join(__dirname, 'dist', 'index.html')
+  );
+
 });
 
+// ======================================
+// ERROR HANDLER
+// ======================================
+
+app.use((err, req, res, next) => {
+
+  console.error(err);
+
+  res.status(500).json({
+    success: false,
+    message: err.message || 'Internal Server Error'
+  });
+
+});
+
+// ======================================
+// START SERVER
+// ======================================
+
 app.listen(PORT, () => {
-  console.log(`Server live on port ${PORT}`);
+
+  console.log(`🚀 Server running on port ${PORT}`);
+
 });
